@@ -1,95 +1,55 @@
-# GroqAgent — ReAct AI Agent with Function Calling
+# SkyScout — AI Travel Agent
 
-A clean, modular Python agent that follows the **ReAct** (Reasoning + Acting)
-pattern using the [Groq API](https://console.groq.com) and tool/function calling.
+A modular ReAct-pattern travel agent built on Groq + function calling.
 
----
-
-## Project layout
+## Structure
 
 ```
 groq-agent/
-├── agent.py          # GroqAgent class — ReAct loop, thread-safe memory
-├── skills.py         # Tool definitions + dispatch registry
+├── agent.py          # GroqAgent class — loads skills.md, runs ReAct loop
+├── skills.md         # Agent persona & tool-usage instructions (edit freely)
+├── tools/
+│   ├── __init__.py   # Merged registry — add modules here
+│   ├── flights.py    # search_flights, get_flight_deals, get_airport_info
+│   └── web_search.py # search_web (DuckDuckGo, no API key needed)
 ├── main.py           # CLI entry point
-├── .env              # API key (git-ignored)
+├── .env              # GROQ_API_KEY
 └── requirements.txt
 ```
 
----
-
 ## Quick start
 
-### 1 — Install dependencies
 ```bash
 pip install -r requirements.txt
-```
-
-### 2 — Set your API key
-Edit `.env`:
-```
-GROQ_API_KEY=your_groq_api_key_here
-```
-Get a free key at <https://console.groq.com>.
-
-> **Replit users**: add `GROQ_API_KEY` as a **Secret** in the Replit
-> Secrets panel instead of editing `.env` — python-dotenv will pick it up
-> automatically via `os.getenv`.
-
-### 3 — Run
-```bash
+# Add GROQ_API_KEY to .env or Replit Secrets panel
 python main.py
 ```
 
----
+## How it works
+
+1. `agent.py` reads `skills.md` at startup and uses it as the system prompt.
+2. The user's message triggers the ReAct loop: the model reasons, calls tools, observes results, and repeats until it has a final answer.
+3. Tools live in `tools/` — each module exports `SCHEMAS` and `REGISTRY`.
+4. `tools/__init__.py` merges everything; `agent.py` never imports individual modules.
+
+## Customising
+
+- **Change the agent's personality or instructions**: edit `skills.md` only.
+- **Add a new tool**: create `tools/my_tool.py` with functions + `SCHEMAS` + `REGISTRY`, then import and merge in `tools/__init__.py`.
+- **Switch model**: change `MODEL` in `agent.py`.
 
 ## CLI commands
 
-| Input    | Effect                                  |
-|----------|-----------------------------------------|
-| `reset`  | Clear conversation memory               |
-| `debug`  | Toggle verbose debug logging            |
-| `exit` / `quit` | Exit the program               |
+| Command | Effect |
+|---------|--------|
+| `reset` | Clear conversation history |
+| `debug` | Toggle verbose logging |
+| `help`  | Show example prompts |
+| `exit`  | Quit |
 
----
+## Example prompts
 
-## Available tools (skills.py)
-
-| Tool | Description |
-|------|-------------|
-| `calculate_image_dimensions` | Computes scaled dimensions, aspect ratio, pixel count, and size category |
-| `fetch_system_status` | Returns mock CPU, memory, disk, uptime, and health status |
-
-### Adding a new tool
-
-1. Write a function in `skills.py` with a detailed docstring.
-2. Add its JSON schema to `TOOL_SCHEMAS`.
-3. Register it in `TOOL_REGISTRY`.
-
-That's it — the agent picks it up automatically.
-
----
-
-## Architecture
-
-```
-main.py
-  └─ GroqAgent.chat(user_message)
-       └─ _react_loop()
-            ├─ _call_api()          ← Groq /v1/chat/completions
-            ├─ [finish="tool_calls"]
-            │    └─ skills.dispatch(name, args)
-            │         └─ tool result injected into memory
-            └─ [finish="stop"]
-                 └─ return final answer
-```
-
-The loop runs up to **6 rounds** before raising a `RuntimeError`, preventing
-infinite tool-calling cycles.
-
----
-
-## Models
-
-Default: `llama-3.3-70b-versatile`  
-Faster/cheaper: change `MODEL` in `agent.py` to `llama3-8b-8192`
+- "Find flights from Bangkok to London on 2025-08-15, 2 passengers"
+- "When is the cheapest time to fly from Koh Samui to Singapore?"
+- "Do I need a visa for Japan as a Thai passport holder?"
+- "What is AirAsia's baggage policy?"

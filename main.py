@@ -1,11 +1,11 @@
 """
-main.py — CLI entry point for the GroqAgent.
+main.py — SkyScout CLI entry point.
 
-Run directly:
+Run:
     python main.py
 
-Environment:
-    GROQ_API_KEY must be set in a .env file (or the shell environment).
+Replit users: set GROQ_API_KEY in the Secrets panel (padlock icon).
+Others:       add GROQ_API_KEY=your_key to the .env file.
 """
 
 import logging
@@ -18,7 +18,7 @@ from groq import AuthenticationError, RateLimitError, APIConnectionError, APISta
 from agent import GroqAgent
 
 # ---------------------------------------------------------------------------
-# Logging — single format, written to stdout so Replit's console shows it
+# Logging — stdout so Replit console and mobile both display it cleanly
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -28,25 +28,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Turn down noisy third-party loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-
 # ---------------------------------------------------------------------------
-# Helpers
+# UI
 # ---------------------------------------------------------------------------
 
 BANNER = """
-╔══════════════════════════════════════════════╗
-║          GroqAgent — ReAct CLI v1.0          ║
-║  Type  'exit' or 'quit'  to stop             ║
-║  Type  'reset'           to clear memory     ║
-║  Type  'debug'           to toggle debug log ║
-╚══════════════════════════════════════════════╝
+  ____  _          ____                     _
+ / ___|| | ___   _/ ___|  ___ ___  _   _  | |_
+ \\___ \\| |/ / | | \\___ \\ / __/ _ \\| | | | | __|
+  ___) |   <| |_| |___) | (_| (_) | |_| | | |_
+ |____/|_|\\_\\\\__, |____/ \\___\\___/ \\__,_|  \\__|
+             |___/    AI Travel Agent
+
+  Commands:  reset  debug  help  exit
+  -----------------------------------------
 """
 
-COMMANDS = {"exit", "quit", "reset", "debug"}
+HELP_TEXT = """
+Available commands:
+  reset   - Clear conversation history and start fresh
+  debug   - Toggle verbose debug logging on/off
+  help    - Show this help message
+  exit    - Quit SkyScout
+
+Try asking:
+  "Find me flights from Bangkok to London next Friday"
+  "What are the cheapest dates to fly Bangkok to Tokyo?"
+  "Do I need a visa to visit Japan as a Thai citizen?"
+  "What is the baggage allowance on AirAsia?"
+"""
 
 
 def _toggle_debug() -> None:
@@ -60,96 +73,84 @@ def _toggle_debug() -> None:
 
 
 def _load_api_key() -> str:
-    """Load GROQ_API_KEY from .env or the environment."""
     load_dotenv()
     key = os.getenv("GROQ_API_KEY", "").strip()
     if not key:
         logger.error(
             "GROQ_API_KEY is not set. "
-            "Add it to your .env file or set it as an environment variable."
+            "Add it to your .env file or the Replit Secrets panel."
         )
         sys.exit(1)
     return key
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     api_key = _load_api_key()
 
     try:
         agent = GroqAgent(api_key=api_key)
-    except Exception as exc:          # noqa: BLE001
-        logger.critical("Failed to initialise GroqAgent: %s", exc)
+    except Exception as exc:
+        logger.critical("Failed to initialise SkyScout: %s", exc)
         sys.exit(1)
 
     print(BANNER)
 
     while True:
-        # ── Prompt ────────────────────────────────────────────────────
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n[system] Goodbye!")
+            print("\nSafe travels! Goodbye.")
             break
 
         if not user_input:
             continue
 
-        # ── Built-in commands ─────────────────────────────────────────
         cmd = user_input.lower()
 
         if cmd in ("exit", "quit"):
-            print("[system] Goodbye!")
+            print("Safe travels! Goodbye.")
             break
 
         if cmd == "reset":
             agent.reset_memory()
-            print("[system] Conversation memory cleared.\n")
+            print("[system] Conversation cleared. Starting fresh!\n")
             continue
 
         if cmd == "debug":
             _toggle_debug()
             continue
 
-        # ── Agent call ────────────────────────────────────────────────
-        print()   # visual spacing
+        if cmd == "help":
+            print(HELP_TEXT)
+            continue
+
+        print()
         try:
             answer = agent.chat(user_input)
-            print(f"Agent: {answer}\n")
+            print(f"SkyScout: {answer}\n")
 
         except AuthenticationError:
-            logger.error(
-                "Authentication failed. Check your GROQ_API_KEY in .env."
-            )
-            print("[error] Invalid API key — please update your .env file.\n")
+            logger.error("Authentication failed - check your GROQ_API_KEY.")
+            print("[error] Invalid API key. Update your .env or Replit Secret.\n")
 
         except RateLimitError:
             logger.error("Rate limit reached after all retries.")
-            print(
-                "[error] Groq rate limit reached. "
-                "Wait a moment and try again.\n"
-            )
+            print("[error] Groq rate limit hit. Please wait a moment and try again.\n")
 
         except APIConnectionError as exc:
             logger.error("Connection error: %s", exc)
-            print(
-                "[error] Could not reach the Groq API. "
-                "Check your internet connection.\n"
-            )
+            print("[error] Cannot reach Groq API. Check your internet connection.\n")
 
         except APIStatusError as exc:
             logger.error("API status error %d: %s", exc.status_code, exc)
-            print(f"[error] Groq API error ({exc.status_code}). Try again.\n")
+            print(f"[error] Groq API error ({exc.status_code}). Please try again.\n")
 
         except RuntimeError as exc:
             logger.error("Agent runtime error: %s", exc)
             print(f"[error] {exc}\n")
 
-        except Exception as exc:          # noqa: BLE001
-            logger.exception("Unexpected error during agent.chat(): %s", exc)
+        except Exception as exc:
+            logger.exception("Unexpected error: %s", exc)
             print(f"[error] Unexpected error: {exc}\n")
 
 

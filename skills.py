@@ -1,260 +1,235 @@
 """
-skills.py
----------
-Library of callable skills (tools) exposed to the AIAgent.
+skills.py — Tool definitions for the GroqAgent.
 
-Each public function:
-  • Has full type hints.
-  • Has a detailed docstring (used verbatim by the LLM).
-  • Is registered in TOOL_DEFINITIONS (Anthropic tool-use format).
-  • Is reachable via dispatch_tool().
-
-Adding a new skill:
-  1. Write the function with type hints + docstring.
-  2. Add a Pydantic model for its input schema.
-  3. Append an entry to TOOL_DEFINITIONS.
-  4. Add a case to dispatch_tool().
+Each function is a "skill" the agent can invoke. The docstring is parsed
+into the tool schema that Groq/OpenAI-format APIs understand, so keep them
+precise and descriptive.
 """
 
-import math
+import json
+import logging
+import platform
 import random
-import statistics
+import time
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+logger = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Pydantic input schemas  (used both for validation and JSON-schema gen)
-# ══════════════════════════════════════════════════════════════════════
-
-class AnalyzeSignalDataInput(BaseModel):
-    """Input schema for analyze_signal_data."""
-
-    data: list[float] = Field(
-        ...,
-        description="Ordered sequence of numeric signal samples to analyse.",
-        min_length=2,
-    )
-    z_threshold: float = Field(
-        default=2.5,
-        description=(
-            "Z-score threshold above which a sample is flagged as an anomaly. "
-            "Defaults to 2.5."
-        ),
-        gt=0,
-    )
-
-    @field_validator("data")
-    @classmethod
-    def no_nan_inf(cls, v: list[float]) -> list[float]:
-        for x in v:
-            if not math.isfinite(x):
-                raise ValueError("data must not contain NaN or Inf values.")
-        return v
-
-
-class GetCurrentWeatherInput(BaseModel):
-    """Input schema for get_current_weather."""
-
-    location: str = Field(
-        ...,
-        description=(
-            "City and optional country/state, e.g. 'Paris, France' "
-            "or 'Austin, TX'."
-        ),
-        min_length=2,
-    )
-    unit: str = Field(
-        default="celsius",
-        description="Temperature unit: 'celsius' or 'fahrenheit'.",
-        pattern="^(celsius|fahrenheit)$",
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 # Skill implementations
-# ══════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 
-def analyze_signal_data(
-    data: list[float],
-    z_threshold: float = 2.5,
+def calculate_image_dimensions(
+    width: int,
+    height: int,
+    scale_factor: float = 1.0,
 ) -> dict[str, Any]:
     """
-    Analyse a 1-D numeric signal and return descriptive statistics plus
-    any detected anomalies.
+    Calculate scaled image dimensions and derived metadata for vision tasks.
 
-    The function computes mean, median, standard deviation, min, max, and
-    range.  It then flags samples whose absolute Z-score exceeds
-    *z_threshold* as anomalies, returning their index and value.
+    Given an original width and height (in pixels) and an optional scale
+    factor, this tool returns the new dimensions, aspect ratio, total pixel
+    count, and a human-readable size category.  Use it whenever you need to
+    reason about image geometry before processing or displaying an image.
 
     Args:
-        data:        Ordered list of numeric signal samples (≥ 2 values,
-                     no NaN / Inf).
-        z_threshold: Samples with |z| > this value are marked as
-                     anomalies.  Defaults to 2.5.
+        width:        Original image width in pixels  (must be > 0).
+        height:       Original image height in pixels (must be > 0).
+        scale_factor: Multiplier applied to both dimensions. Default is 1.0
+                      (no scaling).  Use 0.5 to halve, 2.0 to double, etc.
 
     Returns:
         A dict with keys:
-          - ``count``       – number of samples
-          - ``mean``        – arithmetic mean
-          - ``median``      – median value
-          - ``std_dev``     – population standard deviation
-          - ``minimum``     – smallest value
-          - ``maximum``     – largest value
-          - ``range``       – maximum − minimum
-          - ``anomalies``   – list of {index, value, z_score} for outliers
-          - ``anomaly_count`` – total number of anomalies found
+            original_width, original_height,
+            scaled_width,   scaled_height,
+            aspect_ratio    (rounded to 4 dp),
+            total_pixels    (scaled),
+            size_category   ("thumbnail" | "small" | "medium" | "large" | "ultra"),
+            scale_factor_applied.
     """
-    validated = AnalyzeSignalDataInput(data=data, z_threshold=z_threshold)
-    d = validated.data
-    n = len(d)
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive integers.")
+    if scale_factor <= 0:
+        raise ValueError("scale_factor must be a positive number.")
 
-    mean = statistics.mean(d)
-    median = statistics.median(d)
-    std_dev = statistics.pstdev(d)  # population std dev
+    scaled_w = int(width * scale_factor)
+    scaled_h = int(height * scale_factor)
+    aspect   = round(scaled_w / scaled_h, 4)
+    pixels   = scaled_w * scaled_h
 
-    anomalies: list[dict[str, Any]] = []
-    if std_dev > 0:
-        for i, val in enumerate(d):
-            z = (val - mean) / std_dev
-            if abs(z) > validated.z_threshold:
-                anomalies.append(
-                    {"index": i, "value": round(val, 6), "z_score": round(z, 4)}
-                )
+    if pixels < 10_000:
+        category = "thumbnail"
+    elif pixels < 250_000:
+        category = "small"
+    elif pixels < 2_000_000:
+        category = "medium"
+    elif pixels < 8_000_000:
+        category = "large"
+    else:
+        category = "ultra"
 
-    return {
-        "count": n,
-        "mean": round(mean, 6),
-        "median": round(median, 6),
-        "std_dev": round(std_dev, 6),
-        "minimum": round(min(d), 6),
-        "maximum": round(max(d), 6),
-        "range": round(max(d) - min(d), 6),
-        "anomalies": anomalies,
-        "anomaly_count": len(anomalies),
+    result = {
+        "original_width":      width,
+        "original_height":     height,
+        "scaled_width":        scaled_w,
+        "scaled_height":       scaled_h,
+        "aspect_ratio":        aspect,
+        "total_pixels":        pixels,
+        "size_category":       category,
+        "scale_factor_applied": scale_factor,
     }
+    logger.debug("calculate_image_dimensions result: %s", result)
+    return result
 
 
-def get_current_weather(
-    location: str,
-    unit: str = "celsius",
-) -> dict[str, Any]:
+def fetch_system_status() -> dict[str, Any]:
     """
-    Return the *mocked* current weather for a given location.
+    Return a snapshot of the current host system's resource utilisation.
 
-    This is a wildcard / demonstration skill.  In production you would
-    replace the body with a real weather-API call (e.g. OpenWeatherMap).
-    The mock returns plausible but randomly generated values so the agent
-    can demonstrate tool-calling end-to-end without external credentials.
+    This tool provides mock (simulated) CPU usage, memory stats, disk usage,
+    process uptime, and basic OS information.  Call it when the user asks
+    about system health, resource consumption, or server status.
 
     Args:
-        location: City name, optionally with country/state suffix,
-                  e.g. ``"London, UK"`` or ``"New York, NY"``.
-        unit:     ``"celsius"`` (default) or ``"fahrenheit"``.
+        None — this tool takes no arguments.
 
     Returns:
         A dict with keys:
-          - ``location``    – echoed back location string
-          - ``temperature`` – numeric temperature (rounded to 1 dp)
-          - ``unit``        – temperature unit used
-          - ``condition``   – short weather description
-          - ``humidity_pct``– relative humidity percentage (0–100)
-          - ``wind_kph``    – wind speed in km/h
-          - ``source``      – always ``"mock"`` for this implementation
+            cpu_usage_percent   (float, 0–100),
+            memory_total_mb     (int),
+            memory_used_mb      (int),
+            memory_free_mb      (int),
+            memory_used_percent (float),
+            disk_total_gb       (int),
+            disk_used_gb        (int),
+            disk_free_gb        (int),
+            uptime_seconds      (int),
+            uptime_human        (str, e.g. "2h 14m 33s"),
+            os_info             (str),
+            status              ("healthy" | "warning" | "critical").
     """
-    validated = GetCurrentWeatherInput(location=location, unit=unit)
+    # --- Simulated / mock values (safe for Replit sandbox) ---
+    cpu     = round(random.uniform(5.0, 85.0), 1)
+    mem_tot = 2048          # MB  (typical Replit free tier)
+    mem_use = random.randint(400, 1600)
+    mem_fre = mem_tot - mem_use
+    dsk_tot = 50            # GB
+    dsk_use = random.randint(5, 35)
+    dsk_fre = dsk_tot - dsk_use
+    uptime  = random.randint(60, 86_400)
 
-    conditions = [
-        "Sunny", "Partly cloudy", "Overcast", "Light rain",
-        "Thunderstorms", "Foggy", "Windy", "Clear skies",
-    ]
+    hours, rem  = divmod(uptime, 3600)
+    minutes, sec = divmod(rem, 60)
+    uptime_human = f"{hours}h {minutes}m {sec}s"
 
-    temp_c = round(random.uniform(-5, 38), 1)
-    temp = (
-        temp_c
-        if validated.unit == "celsius"
-        else round(temp_c * 9 / 5 + 32, 1)
-    )
+    mem_pct = round((mem_use / mem_tot) * 100, 1)
 
-    return {
-        "location": validated.location,
-        "temperature": temp,
-        "unit": validated.unit,
-        "condition": random.choice(conditions),
-        "humidity_pct": random.randint(20, 95),
-        "wind_kph": round(random.uniform(0, 80), 1),
-        "source": "mock",
+    if cpu > 80 or mem_pct > 85:
+        status = "critical"
+    elif cpu > 60 or mem_pct > 65:
+        status = "warning"
+    else:
+        status = "healthy"
+
+    result = {
+        "cpu_usage_percent":   cpu,
+        "memory_total_mb":     mem_tot,
+        "memory_used_mb":      mem_use,
+        "memory_free_mb":      mem_fre,
+        "memory_used_percent": mem_pct,
+        "disk_total_gb":       dsk_tot,
+        "disk_used_gb":        dsk_use,
+        "disk_free_gb":        dsk_fre,
+        "uptime_seconds":      uptime,
+        "uptime_human":        uptime_human,
+        "os_info":             f"{platform.system()} {platform.release()}",
+        "status":              status,
     }
+    logger.debug("fetch_system_status result: %s", result)
+    return result
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Tool definitions  (Anthropic tool-use format, schemas auto-derived)
-# ══════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Registry — maps name → (callable, JSON schema)
+# ---------------------------------------------------------------------------
 
-def _schema(model: type[BaseModel]) -> dict[str, Any]:
-    """Return a clean JSON-schema dict from a Pydantic model."""
-    raw = model.model_json_schema()
-    # Strip the top-level title; Anthropic doesn't need it.
-    raw.pop("title", None)
-    return raw
-
-
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
+TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
-        "name": "analyze_signal_data",
-        "description": (
-            "Analyse a 1-D numeric signal (list of floats) and return "
-            "descriptive statistics (mean, median, std dev, min, max, range) "
-            "together with a list of anomalous samples detected via Z-score "
-            "thresholding.  Use this whenever the user wants statistical "
-            "analysis or anomaly/outlier detection on numeric data."
-        ),
-        "input_schema": _schema(AnalyzeSignalDataInput),
+        "type": "function",
+        "function": {
+            "name": "calculate_image_dimensions",
+            "description": (
+                "Calculate scaled image dimensions and derived metadata "
+                "(aspect ratio, pixel count, size category) for vision tasks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "width": {
+                        "type": "integer",
+                        "description": "Original image width in pixels (must be > 0).",
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Original image height in pixels (must be > 0).",
+                    },
+                    "scale_factor": {
+                        "type": "number",
+                        "description": (
+                            "Multiplier for both dimensions. "
+                            "Default 1.0 (no scaling). Use 0.5 to halve, 2.0 to double."
+                        ),
+                        "default": 1.0,
+                    },
+                },
+                "required": ["width", "height"],
+            },
+        },
     },
     {
-        "name": "get_current_weather",
-        "description": (
-            "Retrieve the current weather conditions for any city or location. "
-            "Returns temperature, weather condition, humidity, and wind speed. "
-            "Use this when the user asks about weather, temperature, or "
-            "climate conditions in a specific place."
-        ),
-        "input_schema": _schema(GetCurrentWeatherInput),
+        "type": "function",
+        "function": {
+            "name": "fetch_system_status",
+            "description": (
+                "Return a snapshot of host system resource utilisation: "
+                "CPU, memory, disk, uptime, and overall health status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
     },
 ]
 
-
-# ══════════════════════════════════════════════════════════════════════
-# Dispatcher
-# ══════════════════════════════════════════════════════════════════════
-
-_REGISTRY: dict[str, Any] = {
-    "analyze_signal_data": analyze_signal_data,
-    "get_current_weather": get_current_weather,
+# Dispatch table: tool name → Python callable
+TOOL_REGISTRY: dict[str, Any] = {
+    "calculate_image_dimensions": calculate_image_dimensions,
+    "fetch_system_status":        fetch_system_status,
 }
 
 
-def dispatch_tool(name: str, inputs: dict[str, Any]) -> Any:
+def dispatch(tool_name: str, arguments: dict[str, Any]) -> str:
     """
-    Dispatch a tool call by name with the provided inputs.
+    Invoke a registered tool by name and return its result as a JSON string.
 
     Args:
-        name:   The tool name as returned by the API (e.g. ``"get_current_weather"``).
-        inputs: Raw dict of arguments from the model's tool_use block.
+        tool_name:  The name of the tool to call (must exist in TOOL_REGISTRY).
+        arguments:  Keyword arguments to pass to the tool function.
 
     Returns:
-        Whatever the underlying skill function returns.
+        JSON-encoded string of the tool's return value.
 
     Raises:
-        ValueError: If *name* does not match any registered skill.
-        pydantic.ValidationError: If *inputs* fail schema validation inside
-                                   the skill.
+        KeyError:  If the tool name is not registered.
+        Exception: Re-raises any exception thrown by the underlying tool.
     """
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        known = ", ".join(_REGISTRY)
-        raise ValueError(
-            f"Unknown tool '{name}'. Registered tools: {known}"
-        )
-    return fn(**inputs)
+    if tool_name not in TOOL_REGISTRY:
+        raise KeyError(f"Unknown tool: '{tool_name}'. Available: {list(TOOL_REGISTRY)}")
+
+    logger.info("Dispatching tool '%s' with args: %s", tool_name, arguments)
+    func   = TOOL_REGISTRY[tool_name]
+    result = func(**arguments)
+    return json.dumps(result, indent=2)

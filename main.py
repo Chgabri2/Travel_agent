@@ -1,92 +1,156 @@
 """
-main.py
--------
-CLI entry point for the single-agent chat system.
+main.py — CLI entry point for the GroqAgent.
 
-Usage:
+Run directly:
     python main.py
 
-Commands available during the session:
-    /reset   – clear conversation history
-    /tools   – list available skills
-    /quit    – exit (also: /exit, Ctrl-C, Ctrl-D)
+Environment:
+    GROQ_API_KEY must be set in a .env file (or the shell environment).
 """
 
+import logging
+import os
 import sys
 
-from agent import AIAgent
-from skills import TOOL_DEFINITIONS
+from dotenv import load_dotenv
+from groq import AuthenticationError, RateLimitError, APIConnectionError, APIStatusError
 
-# ── ANSI colour helpers ────────────────────────────────────────────────
-CYAN   = "\033[96m"
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-RESET  = "\033[0m"
-BOLD   = "\033[1m"
+from agent import GroqAgent
 
-BANNER = f"""{CYAN}{BOLD}
-╔══════════════════════════════════════════════════════╗
-║          Single-Agent AI System  •  Claude           ║
-║  Type your message, or a command:                    ║
-║    /tools  – list available skills                   ║
-║    /reset  – clear conversation history              ║
-║    /quit   – exit                                    ║
-╚══════════════════════════════════════════════════════╝
-{RESET}"""
+# ---------------------------------------------------------------------------
+# Logging — single format, written to stdout so Replit's console shows it
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
-PROMPT_USER      = f"{GREEN}You   >{RESET} "
-PROMPT_ASSISTANT = f"{CYAN}Agent >{RESET} "
+# Turn down noisy third-party loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def print_tools() -> None:
-    """Pretty-print the registered tool names and descriptions."""
-    print(f"\n{YELLOW}Available skills:{RESET}")
-    for tool in TOOL_DEFINITIONS:
-        name = tool["name"]
-        desc = tool.get("description", "")
-        # Truncate long descriptions for readability
-        short = desc[:120] + "…" if len(desc) > 120 else desc
-        print(f"  • {BOLD}{name}{RESET}: {short}")
-    print()
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
+BANNER = """
+╔══════════════════════════════════════════════╗
+║          GroqAgent — ReAct CLI v1.0          ║
+║  Type  'exit' or 'quit'  to stop             ║
+║  Type  'reset'           to clear memory     ║
+║  Type  'debug'           to toggle debug log ║
+╚══════════════════════════════════════════════╝
+"""
+
+COMMANDS = {"exit", "quit", "reset", "debug"}
+
+
+def _toggle_debug() -> None:
+    root = logging.getLogger()
+    if root.level == logging.DEBUG:
+        root.setLevel(logging.INFO)
+        print("[system] Debug logging OFF.\n")
+    else:
+        root.setLevel(logging.DEBUG)
+        print("[system] Debug logging ON.\n")
+
+
+def _load_api_key() -> str:
+    """Load GROQ_API_KEY from .env or the environment."""
+    load_dotenv()
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if not key:
+        logger.error(
+            "GROQ_API_KEY is not set. "
+            "Add it to your .env file or set it as an environment variable."
+        )
+        sys.exit(1)
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    print(BANNER)
+    api_key = _load_api_key()
 
     try:
-        agent = AIAgent()
-    except EnvironmentError as exc:
-        print(f"[Setup error] {exc}")
+        agent = GroqAgent(api_key=api_key)
+    except Exception as exc:          # noqa: BLE001
+        logger.critical("Failed to initialise GroqAgent: %s", exc)
         sys.exit(1)
 
+    print(BANNER)
+
     while True:
+        # ── Prompt ────────────────────────────────────────────────────
         try:
-            raw = input(PROMPT_USER).strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nGoodbye!")
+            user_input = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[system] Goodbye!")
             break
 
-        if not raw:
+        if not user_input:
             continue
 
-        # ── Built-in commands ──────────────────────────────────────────
-        if raw.lower() in ("/quit", "/exit", "quit", "exit"):
-            print("Goodbye!")
+        # ── Built-in commands ─────────────────────────────────────────
+        cmd = user_input.lower()
+
+        if cmd in ("exit", "quit"):
+            print("[system] Goodbye!")
             break
 
-        if raw.lower() == "/reset":
-            agent.reset()
-            print(f"{YELLOW}  [Conversation history cleared]{RESET}\n")
+        if cmd == "reset":
+            agent.reset_memory()
+            print("[system] Conversation memory cleared.\n")
             continue
 
-        if raw.lower() == "/tools":
-            print_tools()
+        if cmd == "debug":
+            _toggle_debug()
             continue
 
-        # ── Regular chat turn ──────────────────────────────────────────
-        print()  # breathing room before tool output (if any)
-        response = agent.chat(raw)
-        print(f"{PROMPT_ASSISTANT}{response}\n")
+        # ── Agent call ────────────────────────────────────────────────
+        print()   # visual spacing
+        try:
+            answer = agent.chat(user_input)
+            print(f"Agent: {answer}\n")
+
+        except AuthenticationError:
+            logger.error(
+                "Authentication failed. Check your GROQ_API_KEY in .env."
+            )
+            print("[error] Invalid API key — please update your .env file.\n")
+
+        except RateLimitError:
+            logger.error("Rate limit reached after all retries.")
+            print(
+                "[error] Groq rate limit reached. "
+                "Wait a moment and try again.\n"
+            )
+
+        except APIConnectionError as exc:
+            logger.error("Connection error: %s", exc)
+            print(
+                "[error] Could not reach the Groq API. "
+                "Check your internet connection.\n"
+            )
+
+        except APIStatusError as exc:
+            logger.error("API status error %d: %s", exc.status_code, exc)
+            print(f"[error] Groq API error ({exc.status_code}). Try again.\n")
+
+        except RuntimeError as exc:
+            logger.error("Agent runtime error: %s", exc)
+            print(f"[error] {exc}\n")
+
+        except Exception as exc:          # noqa: BLE001
+            logger.exception("Unexpected error during agent.chat(): %s", exc)
+            print(f"[error] Unexpected error: {exc}\n")
 
 
 if __name__ == "__main__":

@@ -1,18 +1,18 @@
-# Single-Agent AI System
+# GroqAgent — ReAct AI Agent with Function Calling
 
-A clean, modular Python agent built on the **Anthropic API** (Claude) with
-tool-calling, conversation memory, and a typed skill library.
+A clean, modular Python agent that follows the **ReAct** (Reasoning + Acting)
+pattern using the [Groq API](https://console.groq.com) and tool/function calling.
 
 ---
 
-## Project structure
+## Project layout
 
 ```
-single-agent/
-├── agent.py          # AIAgent class — API calls, tool loop, memory
-├── skills.py         # Skill library — functions, Pydantic schemas, dispatcher
+groq-agent/
+├── agent.py          # GroqAgent class — ReAct loop, thread-safe memory
+├── skills.py         # Tool definitions + dispatch registry
 ├── main.py           # CLI entry point
-├── .env.template     # Copy to .env and fill in your key
+├── .env              # API key (git-ignored)
 └── requirements.txt
 ```
 
@@ -20,77 +20,76 @@ single-agent/
 
 ## Quick start
 
+### 1 — Install dependencies
 ```bash
-# 1. Clone / copy the files, then enter the directory
-cd single-agent
-
-# 2. Create and activate a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
+```
 
-# 4. Add your API key
-cp .env.template .env
-#  → open .env and replace the placeholder with your real key
+### 2 — Set your API key
+Edit `.env`:
+```
+GROQ_API_KEY=your_groq_api_key_here
+```
+Get a free key at <https://console.groq.com>.
 
-# 5. Run
+> **Replit users**: add `GROQ_API_KEY` as a **Secret** in the Replit
+> Secrets panel instead of editing `.env` — python-dotenv will pick it up
+> automatically via `os.getenv`.
+
+### 3 — Run
+```bash
 python main.py
 ```
 
 ---
 
-## Built-in CLI commands
+## CLI commands
 
-| Command  | Effect                          |
-|----------|---------------------------------|
-| `/tools` | List registered skills          |
-| `/reset` | Clear conversation history      |
-| `/quit`  | Exit (`/exit` or Ctrl-C also work) |
-
----
-
-## Built-in skills
-
-### `analyze_signal_data`
-Accepts a list of floats and returns:
-- Descriptive stats: mean, median, std dev, min, max, range
-- Anomaly list: any sample whose absolute Z-score exceeds the threshold
-
-Example prompt:
-> "Analyse this signal: 1.2, 1.3, 1.1, 1.4, 9.8, 1.2, 1.3"
-
-### `get_current_weather` *(mocked)*
-Returns plausible-but-random weather data for any city.
-
-Example prompt:
-> "What's the weather like in Tokyo right now?"
+| Input    | Effect                                  |
+|----------|-----------------------------------------|
+| `reset`  | Clear conversation memory               |
+| `debug`  | Toggle verbose debug logging            |
+| `exit` / `quit` | Exit the program               |
 
 ---
 
-## Adding a new skill
+## Available tools (skills.py)
 
-1. **Write the function** in `skills.py` with type hints + docstring.
-2. **Create a Pydantic input model** for validation and schema generation.
-3. **Append to `TOOL_DEFINITIONS`** — the schema is derived automatically via `_schema()`.
-4. **Register in `_REGISTRY`** inside `dispatch_tool()`.
+| Tool | Description |
+|------|-------------|
+| `calculate_image_dimensions` | Computes scaled dimensions, aspect ratio, pixel count, and size category |
+| `fetch_system_status` | Returns mock CPU, memory, disk, uptime, and health status |
 
-That's it — the agent picks it up automatically on the next run.
+### Adding a new tool
+
+1. Write a function in `skills.py` with a detailed docstring.
+2. Add its JSON schema to `TOOL_SCHEMAS`.
+3. Register it in `TOOL_REGISTRY`.
+
+That's it — the agent picks it up automatically.
 
 ---
 
-## Architecture notes
+## Architecture
 
-- **`AIAgent.chat()`** appends the user message, runs the agentic loop, and
-  appends the final assistant reply — keeping `self.history` clean.
-- **The agentic loop** (`_run_agentic_loop`) calls the API, detects
-  `stop_reason == "tool_use"`, dispatches every tool-use block in parallel
-  (within the same turn), appends results, and loops until the model
-  returns a plain text response.
-- **Pydantic models** serve dual purpose: they validate incoming tool
-  arguments at runtime *and* auto-generate the `input_schema` JSON that
-  the Anthropic API requires.
-- **Error handling** covers API status errors, connection errors, unknown
-  tool names, and Pydantic validation failures — all surfaced as readable
-  messages rather than stack traces.
+```
+main.py
+  └─ GroqAgent.chat(user_message)
+       └─ _react_loop()
+            ├─ _call_api()          ← Groq /v1/chat/completions
+            ├─ [finish="tool_calls"]
+            │    └─ skills.dispatch(name, args)
+            │         └─ tool result injected into memory
+            └─ [finish="stop"]
+                 └─ return final answer
+```
+
+The loop runs up to **6 rounds** before raising a `RuntimeError`, preventing
+infinite tool-calling cycles.
+
+---
+
+## Models
+
+Default: `llama-3.3-70b-versatile`  
+Faster/cheaper: change `MODEL` in `agent.py` to `llama3-8b-8192`
